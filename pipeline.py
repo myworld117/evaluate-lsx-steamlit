@@ -108,11 +108,87 @@ BOMR20_SCHEMA = {
 }
 
 INVR17_SCHEMA = {
+    "Ma_NVL_INVR": ("Mã SP", "Mã NVL"),
     "Ma_CT_INVR": ("Mã CT",),
     "Ghi_chu_INVR": ("Ghi chú",),
     "LSX_INVR": ("LSX",),
     "SL_bien_dong_INVR": ("SL biến động",),
 }
+
+
+def _build_5402_quantity_map(
+    invr17: pd.DataFrame,
+) -> dict[tuple[str, str], float]:
+    """Cộng SL biến động phiếu 5402 theo đúng cặp (LSX, Mã NVL)."""
+    ma_ct = invr17["Ma_CT_INVR"].fillna("").astype(str).str.strip()
+    quantity = pd.to_numeric(
+        invr17["SL_bien_dong_INVR"], errors="coerce"
+    ).fillna(0)
+    quantity_map: dict[tuple[str, str], float] = {}
+
+    for index in invr17.index[ma_ct.str.startswith("5402")]:
+        material_value = invr17.at[index, "Ma_NVL_INVR"]
+        if pd.isna(material_value):
+            continue
+        material = str(material_value).strip()
+        if not material:
+            continue
+
+        lsx_values: set[str] = set()
+        direct_lsx_value = invr17.at[index, "LSX_INVR"]
+        if not pd.isna(direct_lsx_value):
+            direct_lsx = str(direct_lsx_value).strip()
+            if direct_lsx:
+                lsx_values.add(direct_lsx)
+
+        note_value = invr17.at[index, "Ghi_chu_INVR"]
+        if not pd.isna(note_value) and str(note_value).strip():
+            note = str(note_value).strip()
+            lsx_values.update(
+                token.strip()
+                for token in note.replace(",", " ")
+                .replace(";", " ")
+                .split()
+                if token.strip()
+            )
+
+        for lsx in lsx_values:
+            key = (lsx, material)
+            quantity_map[key] = quantity_map.get(key, 0.0) + float(
+                quantity.at[index]
+            )
+
+    return quantity_map
+
+
+def _apply_5402_sp_corrections(
+    df: pd.DataFrame,
+    invr17: pd.DataFrame,
+    tolerance: float = 0.01,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Chuyển SP không đạt thành đạt khi phiếu 5402 khớp LSX, NVL và SL."""
+    quantity_map = _build_5402_quantity_map(invr17)
+    quantities = pd.Series(
+        [
+            quantity_map.get(
+                (str(lsx).strip(), str(material).strip()),
+                np.nan,
+            )
+            for lsx, material in zip(df["Ma_so_lenh_tao"], df["Ma_NVL"])
+        ],
+        index=df.index,
+        dtype="float64",
+    )
+    differences = pd.to_numeric(df["Chenh_lech"], errors="coerce")
+    matched = (
+        df["DA_SP"].eq("LSX không đạt")
+        & quantities.notna()
+        & differences.notna()
+        & ((quantities.abs() - differences.abs()).abs() < tolerance)
+    )
+    corrected = df["DA_SP"].copy()
+    corrected.loc[matched] = "LSX đạt"
+    return corrected, matched, quantities
 
 
 def process(data: dict) -> pd.DataFrame:
@@ -152,7 +228,12 @@ def process(data: dict) -> pd.DataFrame:
         data["invr17"],
         "INVR17",
         INVR17_SCHEMA,
-        {"Ma_CT_INVR", "LSX_INVR", "SL_bien_dong_INVR"},
+        {
+            "Ma_NVL_INVR",
+            "Ma_CT_INVR",
+            "LSX_INVR",
+            "SL_bien_dong_INVR",
+        },
         defaults={"Ghi_chu_INVR": ""},
     )
 
@@ -748,53 +829,34 @@ def process(data: dict) -> pd.DataFrame:
         default=""
     )
 
-    # ── LSX (AO): 5 bước ưu tiên theo logic mới ──────────────
+    # ── Phiếu 5402: hiệu chỉnh từng SP/NVL trước khi chốt LSX ─
+    # Chỉ dòng Đánh giá trên SP = "LSX không đạt" mới được hiệu chỉnh.
+    # Phiếu phải cùng LSX, cùng Mã NVL và:
+    # ABS(Tổng SL biến động 5402) = ABS(Chênh lệch lượng dùng), sai số < 0,01.
+    (
+        df["DA_SP"],
+        df["_5402_nvl_match"],
+        df["_5402_qty_nvl"],
+    ) = _apply_5402_sp_corrections(df, invr17)
+
+    # ── LSX (AO): đánh giá lại sau khi hiệu chỉnh từng SP/NVL ─
     lsx_groups = df.groupby("Ma_so_lenh_tao")
     lsx_kll_count = lsx_groups["LSX_khong_linh_lieu"].transform(lambda x: (x.str.strip() != "").sum())
     lsx_dat_count = lsx_groups["DA_SP"].transform(lambda x: (x == "LSX đạt").sum())
     lsx_kd_count = lsx_groups["DA_SP"].transform(lambda x: (x == "LSX không đạt").sum())
     lsx_qm_count = lsx_groups["DA_SP"].transform(lambda x: ((x == "x") | (x == "?")).sum())
-    lsx_sum_ct5 = lsx_groups["CT6_TongChenhLech"].transform("sum")  # CT6 = Tổng chênh lệch
-
-    # Bước 4: -tổng CT6 = tổng SL biến động INVR17 (chỉ cho LSX có phiếu 5402)
-    has_5402 = df["Phieu_linh_vuot_5402"].fillna("").str.strip() != ""
-    lsx_has_5402 = lsx_groups["Phieu_linh_vuot_5402"].transform(lambda x: (x.fillna("").str.strip() != "").any())
-    invr17["_slbd"] = pd.to_numeric(
-        invr17["SL_bien_dong_INVR"], errors="coerce"
-    ).fillna(0)
-    # Map SL biến động theo cột LSX trong INVR17
-    invr17["_lsx_invr"] = (
-        invr17["LSX_INVR"].fillna("").astype(str).str.strip()
+    lsx_is_mc = lsx_groups["DCSX_GC"].transform(
+        lambda values: values.fillna("").astype(str).str.strip().eq("MC").any()
     )
-    invr_slbd_sum_by_lsx = invr17[invr17["_lsx_invr"] != ""].groupby("_lsx_invr")["_slbd"].sum()
-    # Bổ sung: map SL biến động từ Ghi chú cho LSX không có trong cột LSX
-    mask_5402_slbd = invr17["_ma_ct_str"].str.startswith("5402")
-    invr17["_ghi_chu_for_slbd"] = (
-        invr17["Ghi_chu_INVR"].fillna("").astype(str).str.strip()
-    )
-    ghi_chu_slbd_map = {}
-    all_lsx_in_invr = set(invr17["_lsx_invr"].unique())
-    for _, r in invr17[mask_5402_slbd].iterrows():
-        gc = r["_ghi_chu_for_slbd"]
-        slbd = r["_slbd"]
-        if gc:
-            for token in gc.replace(",", " ").replace(";", " ").split():
-                token = token.strip()
-                if token and token not in all_lsx_in_invr:
-                    ghi_chu_slbd_map[token] = ghi_chu_slbd_map.get(token, 0) + slbd
-    # Map: LSX → tổng SL biến động (không double-count)
-    df["_invr_sum"] = df["Ma_so_lenh_tao"].map(invr_slbd_sum_by_lsx).fillna(0)
-    # Chỉ thêm Ghi chú contribution cho LSX không có trong cột LSX
-    if ghi_chu_slbd_map:
-        df["_invr_sum_gc"] = df["Ma_so_lenh_tao"].map(ghi_chu_slbd_map).fillna(0)
-        df["_invr_sum"] = df["_invr_sum"] + df["_invr_sum_gc"]
-    invr_match = lsx_has_5402 & (np.abs(-lsx_sum_ct5 - df["_invr_sum"]) < 0.01)
 
-    # 5 bước ưu tiên
+    # Thứ tự ưu tiên:
+    # 1. Có không lĩnh liệu -> toàn LSX không lĩnh liệu.
+    # 2. Nếu không, DCSX MC -> toàn LSX đạt.
+    # 3. Nếu không, có đạt > 0, không đạt = 0, ? = 0 -> toàn LSX đạt.
+    # 4. Còn lại -> toàn LSX không đạt.
     lsx_dat = (
-        is_mc |  # Bước 2: MC luôn đạt
-        ((lsx_dat_count > 0) & (lsx_kd_count == 0) & (lsx_qm_count == 0)) |  # Bước 3
-        invr_match  # Bước 4: INVR17 khớp (chỉ LSX có 5402)
+        lsx_is_mc
+        | ((lsx_dat_count > 0) & (lsx_kd_count == 0) & (lsx_qm_count == 0))
     )
 
     df["DA_LSX"] = np.where(
