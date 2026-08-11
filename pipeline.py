@@ -76,14 +76,13 @@ MOCR_SCHEMA = {
     "Kho_SX": ("Kho SX",),
     "Ten_kho_SX": ("Tên kho sản xuất",),
     "Ma_NVL": ("Mã NVL",),
-    "Ten_VP2": ("Tên VP2",),
-    "DV3": ("ĐV3",),
+    "Ten_VP2": ("Tên VP2", "Tên VP.1"),
+    "DV3": ("ĐV3", "ĐV.1"),
     "Luong_dung_tieu_chuan_goc": ("Lượng dùng tiêu chuẩn",),
     "SL_dung_thuc": ("SL dùng thực",),
 }
 
 MOCR_REQUIRED = {
-    "LINK",
     "DCSX_GC",
     "Ma_so_lenh_tao",
     "Ma_SP",
@@ -124,6 +123,7 @@ def process(data: dict) -> pd.DataFrame:
         MOCR_SCHEMA,
         MOCR_REQUIRED,
         defaults={
+            "LINK": pd.NA,
             "Ten_DCSX_GC": "",
             "Ngay_khoi_cong": pd.NaT,
             "Ngay_hoan_tat": pd.NaT,
@@ -155,6 +155,17 @@ def process(data: dict) -> pd.DataFrame:
         {"Ma_CT_INVR", "LSX_INVR", "SL_bien_dong_INVR"},
         defaults={"Ghi_chu_INVR": ""},
     )
+
+    # LINK trong file cũ là kết quả tra Mã LSX của MOCR27 trong cột LSX của
+    # INVR17: tìm thấy thì LINK = Mã LSX, không tìm thấy thì #N/A. Khi file
+    # nguồn mới không còn cột phụ này, dựng lại đúng điều kiện tra cứu để
+    # người dùng không phải tự thêm công thức hoặc xóa cột trước khi upload.
+    if df["LINK"].isna().all():
+        invr_lsx = set(
+            invr17["LSX_INVR"].fillna("").astype(str).str.strip()
+        )
+        mocr_lsx = df["Ma_so_lenh_tao"].fillna("").astype(str).str.strip()
+        df["LINK"] = mocr_lsx.where(mocr_lsx.isin(invr_lsx), pd.NA)
 
     # Chỉ xét các dòng có LINK hợp lệ. Với file XLSB, lỗi Excel #N/A có thể
     # được pyxlsb đọc thành mã lỗi hexadecimal ``0x2a`` (mã lỗi #N/A), nên
