@@ -1,32 +1,160 @@
 """Pipeline xử lý dữ liệu LSX — module độc lập, không streamlit cache."""
+
+import re
+import unicodedata
+
 import pandas as pd
 import numpy as np
 
 
+def _normalize_header(value: object) -> str:
+    """Chuẩn hóa header để không phụ thuộc hoa/thường, dấu và khoảng trắng."""
+    text = str(value).strip().replace("đ", "d").replace("Đ", "D")
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+def _select_input_columns(
+    frame: pd.DataFrame,
+    sheet_name: str,
+    schema: dict[str, tuple[str, ...]],
+    required: set[str],
+    defaults: dict[str, object] | None = None,
+) -> pd.DataFrame:
+    """Chỉ lấy field pipeline dùng và bỏ qua toàn bộ cột thừa."""
+    defaults = defaults or {}
+    normalized_columns: dict[str, object] = {}
+    for column in frame.columns:
+        normalized_columns.setdefault(_normalize_header(column), column)
+
+    selected: dict[str, pd.Series] = {}
+    missing: list[str] = []
+    for canonical, aliases in schema.items():
+        source_column = next(
+            (
+                normalized_columns[_normalize_header(alias)]
+                for alias in aliases
+                if _normalize_header(alias) in normalized_columns
+            ),
+            None,
+        )
+        if source_column is not None:
+            selected[canonical] = frame[source_column]
+        elif canonical in required:
+            missing.append(aliases[0] if aliases else canonical)
+        else:
+            selected[canonical] = pd.Series(
+                defaults.get(canonical, pd.NA),
+                index=frame.index,
+            )
+
+    if missing:
+        raise ValueError(
+            f"Sheet {sheet_name} thiếu cột bắt buộc: {', '.join(missing)}"
+        )
+
+    return pd.DataFrame(selected, index=frame.index).copy()
+
+
+MOCR_SCHEMA = {
+    "LINK": ("LINK",),
+    "DCSX_GC": (
+        "Dây chuyền SX/nhà máy gia công",
+        "DCSX/GC",
+    ),
+    "Ten_DCSX_GC": ("Tên dây chuyền SX/nhà máy gia công",),
+    "Ma_so_lenh_tao": ("Mã số lệnh tạo", "Mã LSX", "LSX"),
+    "Ngay_khoi_cong": ("Ngày khởi công thực tế",),
+    "Ngay_hoan_tat": ("Ngày hoàn tất thực tế",),
+    "Ma_SP": ("Mã SP",),
+    "Ten_VP": ("Tên VP",),
+    "DV": ("ĐV",),
+    "Tinh_trang_lenh_SX": ("Tình trạng lệnh SX",),
+    "SL_du_tinh": ("SL dự tính",),
+    "San_luong_thuc_te": ("Sản lượng thực tế", "SL thực tế"),
+    "Kho_SX": ("Kho SX",),
+    "Ten_kho_SX": ("Tên kho sản xuất",),
+    "Ma_NVL": ("Mã NVL",),
+    "Ten_VP2": ("Tên VP2",),
+    "DV3": ("ĐV3",),
+    "Luong_dung_tieu_chuan_goc": ("Lượng dùng tiêu chuẩn",),
+    "SL_dung_thuc": ("SL dùng thực",),
+}
+
+MOCR_REQUIRED = {
+    "LINK",
+    "DCSX_GC",
+    "Ma_so_lenh_tao",
+    "Ma_SP",
+    "Tinh_trang_lenh_SX",
+    "San_luong_thuc_te",
+    "Ma_NVL",
+    "Luong_dung_tieu_chuan_goc",
+    "SL_dung_thuc",
+}
+
+BOM_SCHEMA = {
+    "Ma_SP_BOM": ("Thành phẩm/Bán TP",),
+    "Ma_NVL_BOM": ("Mã NVL",),
+    "Luong_dung_to_hop": ("Lượng dùng tổ hợp",),
+    "Mau_so": ("Mẫu số",),
+}
+
+BOMR20_SCHEMA = {
+    "NVL_chinh": ("chính",),
+    "NVL_thay_the": ("thay thế",),
+    "Pham_vi_SP": ("Mã NVL chính",),
+    "SL": ("thay thế/chính",),
+}
+
+INVR17_SCHEMA = {
+    "Ma_CT_INVR": ("Mã CT",),
+    "Ghi_chu_INVR": ("Ghi chú",),
+    "LSX_INVR": ("LSX",),
+    "SL_bien_dong_INVR": ("SL biến động",),
+}
+
+
 def process(data: dict) -> pd.DataFrame:
     """Chạy toàn bộ pipeline. Input: dict với keys: mocr, bom, bomr20, invr17."""
-    df = data["mocr"].copy()
-    bom = data["bom"].copy()
-    bomr20 = data["bomr20"].copy()
-    invr17 = data["invr17"].copy()
-
-    # ── Chuẩn hóa tên cột (theo vị trí) ────────────────────
-    cols = df.columns.tolist()
-    nvl_col_idx = None
-    for i, c in enumerate(cols):
-        if "Mã NVL" in str(c) or "Ma NVL" in str(c):
-            nvl_col_idx = i
-            break
-    if nvl_col_idx is None:
-        nvl_col_idx = 14  # fallback
-
-    df.columns = [
-        "LINK", "DCSX_GC", "Ten_DCSX_GC", "Ma_so_lenh_tao",
-        "Ngay_khoi_cong", "Ngay_hoan_tat", "Ma_SP", "Ten_VP",
-        "DV", "Tinh_trang_lenh_SX", "SL_du_tinh", "San_luong_thuc_te",
-        "Kho_SX", "Ten_kho_SX", "Ma_NVL", "Ten_VP2", "DV3",
-        "Luong_dung_tieu_chuan_goc", "SL_dung_thuc",
-    ]
+    df = _select_input_columns(
+        data["mocr"],
+        "MOCR27",
+        MOCR_SCHEMA,
+        MOCR_REQUIRED,
+        defaults={
+            "Ten_DCSX_GC": "",
+            "Ngay_khoi_cong": pd.NaT,
+            "Ngay_hoan_tat": pd.NaT,
+            "Ten_VP": "",
+            "DV": "",
+            "SL_du_tinh": pd.NA,
+            "Kho_SX": "",
+            "Ten_kho_SX": "",
+            "Ten_VP2": "",
+            "DV3": "",
+        },
+    )
+    bom = _select_input_columns(
+        data["bom"],
+        "BOM ĐẾN 24.07",
+        BOM_SCHEMA,
+        set(BOM_SCHEMA),
+    )
+    bomr20 = _select_input_columns(
+        data["bomr20"],
+        "BOMR20 - NVL TT",
+        BOMR20_SCHEMA,
+        set(BOMR20_SCHEMA),
+    )
+    invr17 = _select_input_columns(
+        data["invr17"],
+        "INVR17",
+        INVR17_SCHEMA,
+        {"Ma_CT_INVR", "LSX_INVR", "SL_bien_dong_INVR"},
+        defaults={"Ghi_chu_INVR": ""},
+    )
 
     # Chỉ xét các dòng có LINK hợp lệ. Với file XLSB, lỗi Excel #N/A có thể
     # được pyxlsb đọc thành mã lỗi hexadecimal ``0x2a`` (mã lỗi #N/A), nên
@@ -61,25 +189,7 @@ def process(data: dict) -> pd.DataFrame:
     df["XH_num"] = xh_count
 
     # ── Chuẩn bị BOM lookup ─────────────────────────────────
-    bom_cols = bom.columns.tolist()
-    ma_nvl_col = bom_cols[5]
-    luong_dung_th_col = bom_cols[14]
-    mau_so_col = bom_cols[15]
-
-    # Tìm bằng tên nếu có
-    for c in bom_cols:
-        cs = str(c).strip().lower()
-        if "mã nvl" in cs: ma_nvl_col = c
-        if "lượng dùng tổ hợp" in cs: luong_dung_th_col = c
-        if "mẫu số" in cs: mau_so_col = c
-
-    # Tìm cột Thành phẩm/Bán TP để join với Mã SP
-    tp_col = bom_cols[1]  # "Thành phẩm/Bán TP"
-    for c in bom_cols:
-        if "thành phẩm" in str(c).lower(): tp_col = c
-
-    bom_lookup = bom[[tp_col, ma_nvl_col, luong_dung_th_col, mau_so_col]].copy()
-    bom_lookup.columns = ["Ma_SP_BOM", "Ma_NVL_BOM", "Luong_dung_to_hop", "Mau_so"]
+    bom_lookup = bom.copy()
     bom_lookup = bom_lookup.dropna(subset=["Ma_NVL_BOM"])
     for c in ["Luong_dung_to_hop", "Mau_so"]:
         bom_lookup[c] = pd.to_numeric(bom_lookup[c], errors="coerce").fillna(0)
@@ -88,28 +198,9 @@ def process(data: dict) -> pd.DataFrame:
     bom_lookup = bom_lookup.groupby(["Ma_SP_BOM", "Ma_NVL_BOM"]).first().reset_index()
 
     # ── Chuẩn bị BOMR20 lookup ──────────────────────────────
-    bomr20_cols = bomr20.columns.tolist()
-    chinh_col = bomr20_cols[2]
-    thaythe_col = bomr20_cols[15]
-    ma_nvl_chinh_col = bomr20_cols[8]
-    for c in bomr20_cols:
-        cs = str(c).strip().lower()
-        if cs == "chính": chinh_col = c
-        if cs == "thay thế": thaythe_col = c
-        if cs == "mã nvl chính": ma_nvl_chinh_col = c
-
     # Lấy tỷ lệ quy đổi từ cột "thay thế/chính". Cột "TT thay thế" chỉ là
     # thứ tự của NVL thay thế, không phải hệ số quy đổi.
-    tt_thaythe_col = bomr20_cols[24]
-    for c in bomr20_cols:
-        if str(c).strip().lower() == "thay thế/chính":
-            tt_thaythe_col = c
-    pair_sl_lookup = bomr20[
-        [chinh_col, thaythe_col, ma_nvl_chinh_col, tt_thaythe_col]
-    ].copy()
-    pair_sl_lookup.columns = [
-        "NVL_chinh", "NVL_thay_the", "Pham_vi_SP", "SL"
-    ]
+    pair_sl_lookup = bomr20.copy()
     pair_sl_lookup = pair_sl_lookup.dropna(subset=["NVL_chinh", "NVL_thay_the"])
     pair_sl_lookup["SL"] = pd.to_numeric(
         pair_sl_lookup["SL"], errors="coerce"
@@ -474,16 +565,10 @@ def process(data: dict) -> pd.DataFrame:
     df["LSX_khong_linh_lieu"] = np.where(lsx_total == 0, "LSX không lĩnh liệu", "")
 
     # ── Bước 8: Kiểm tra phiếu 5402 ─────────────────────────
-    invr17_cols = invr17.columns.tolist()
-    ma_ct_col = invr17_cols[8]
-    ghi_chu_col = invr17_cols[27]  # fallback
-    for c in invr17_cols:
-        cs = str(c).strip().lower()
-        if "mã ct" in cs or "mã ct" in cs: ma_ct_col = c
-        if "ghi chú" in cs: ghi_chu_col = c
-
-    invr17["_ma_ct_str"] = invr17[ma_ct_col].fillna("").astype(str)
-    invr17["_ghi_chu_str"] = invr17[ghi_chu_col].fillna("").astype(str)
+    invr17["_ma_ct_str"] = invr17["Ma_CT_INVR"].fillna("").astype(str)
+    invr17["_ghi_chu_str"] = (
+        invr17["Ghi_chu_INVR"].fillna("").astype(str)
+    )
 
     # Tìm LSX có phiếu 5402: Mã CT bắt đầu bằng 5402
     mask_5402 = invr17["_ma_ct_str"].str.startswith("5402")
@@ -498,15 +583,11 @@ def process(data: dict) -> pd.DataFrame:
             if token:
                 lsx_5402_set.add(token)
 
-    # Đồng thời cũng kiểm tra cột LSX trong INVR17 (nếu có)
-    lsx_col_invr = None
-    for c in invr17_cols:
-        if str(c).strip().lower() == "lsx":
-            lsx_col_invr = c
-            break
-    if lsx_col_invr:
-        invr17["_lsx_str"] = invr17[lsx_col_invr].fillna("").astype(str)
-        lsx_5402_set |= set(invr17.loc[mask_5402, "_lsx_str"].dropna().unique())
+    # Đồng thời cũng kiểm tra cột LSX trong INVR17.
+    invr17["_lsx_str"] = invr17["LSX_INVR"].fillna("").astype(str)
+    lsx_5402_set |= set(
+        invr17.loc[mask_5402, "_lsx_str"].dropna().unique()
+    )
 
     df["_5402_flag"] = df["Ma_so_lenh_tao"].isin(lsx_5402_set)
     df["Phieu_linh_vuot_5402"] = np.where(df["_5402_flag"], df["Ma_so_lenh_tao"], "")
@@ -667,19 +748,19 @@ def process(data: dict) -> pd.DataFrame:
     # Bước 4: -tổng CT6 = tổng SL biến động INVR17 (chỉ cho LSX có phiếu 5402)
     has_5402 = df["Phieu_linh_vuot_5402"].fillna("").str.strip() != ""
     lsx_has_5402 = lsx_groups["Phieu_linh_vuot_5402"].transform(lambda x: (x.fillna("").str.strip() != "").any())
-    invr17_cols2 = invr17.columns.tolist()
-    slbd_col = invr17_cols2[17]
-    lsx_col_invr2 = invr17_cols2[26]
-    for c in invr17_cols2:
-        if "biến" in str(c).lower() and "sl" in str(c).lower(): slbd_col = c
-        if str(c).strip() == "LSX": lsx_col_invr2 = c
-    invr17["_slbd"] = pd.to_numeric(invr17[slbd_col], errors="coerce").fillna(0)
+    invr17["_slbd"] = pd.to_numeric(
+        invr17["SL_bien_dong_INVR"], errors="coerce"
+    ).fillna(0)
     # Map SL biến động theo cột LSX trong INVR17
-    invr17["_lsx_invr"] = invr17[lsx_col_invr2].fillna("").astype(str).str.strip()
+    invr17["_lsx_invr"] = (
+        invr17["LSX_INVR"].fillna("").astype(str).str.strip()
+    )
     invr_slbd_sum_by_lsx = invr17[invr17["_lsx_invr"] != ""].groupby("_lsx_invr")["_slbd"].sum()
     # Bổ sung: map SL biến động từ Ghi chú cho LSX không có trong cột LSX
     mask_5402_slbd = invr17["_ma_ct_str"].str.startswith("5402")
-    invr17["_ghi_chu_for_slbd"] = invr17[ghi_chu_col].fillna("").astype(str).str.strip()
+    invr17["_ghi_chu_for_slbd"] = (
+        invr17["Ghi_chu_INVR"].fillna("").astype(str).str.strip()
+    )
     ghi_chu_slbd_map = {}
     all_lsx_in_invr = set(invr17["_lsx_invr"].unique())
     for _, r in invr17[mask_5402_slbd].iterrows():
