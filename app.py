@@ -300,7 +300,12 @@ def main():
         tt_opts = ["Tất cả"] + sorted(result[COL_TINH_TRANG].dropna().unique().tolist())
         sel_tt = st.selectbox("Tình trạng lệnh SX", tt_opts)
 
-        xh_opts = ["Tất cả"] + sorted(result[COL_XH].dropna().unique().tolist(), key=lambda x: int(x) if x.isdigit() else 999)
+        xh_opts = ["Tất cả"] + sorted(
+            result[COL_XH].dropna().unique().tolist(),
+            key=lambda value: (
+                int(value) if str(value).isdigit() else 999
+            ),
+        )
         sel_xh = st.selectbox("Số lần xuất hiện (XH)", xh_opts)
 
         pl_opts = ["Tất cả"] + sorted(result[COL_PHAN_LOAI].dropna().unique().tolist())

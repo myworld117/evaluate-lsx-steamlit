@@ -276,9 +276,7 @@ def process(data: dict) -> pd.DataFrame:
 
     # ── Bước 1: Xác định XH = số dòng NVL trong cùng LSX ────
     xh_count = df.groupby("Ma_so_lenh_tao")["Ma_so_lenh_tao"].transform("count")
-    df["XH_count"] = xh_count
-    df["XH"] = xh_count.astype(str)
-    df["XH_num"] = xh_count
+    df["XH"] = xh_count.astype(int)
 
     # ── Chuẩn bị BOM lookup ─────────────────────────────────
     bom_lookup = bom.copy()
@@ -569,6 +567,7 @@ def process(data: dict) -> pd.DataFrame:
         if first == "5": return "Vật tư (5)"
         if first == "3": return "BTP (3)"
         if first == "1": return "TP (1)"
+        if first == "6": return "CCDC"
         if first == "8": return "NVL KH gửi (8)"
         return f"Khác ({first})"
 
@@ -600,7 +599,7 @@ def process(data: dict) -> pd.DataFrame:
         df.loc[mask_sub, "NVL_thay_the_flag"] = main_str + "-" + sub_str
 
     # ── Bước 6: Tính 8 Công thức ────────────────────────────
-    mask_xh1 = df["XH_num"] == 1
+    mask_xh1 = df["XH"] == 1
     # Gộp trạng thái: "Đang SX" riêng, còn lại → "*hoàn thành" (như Excel)
     df["_tt_gop"] = np.where(df["Tinh_trang_lenh_SX"].fillna("").astype(str).str.strip() == "Đang SX",
                              "Đang SX", "*hoàn thành")
@@ -611,7 +610,7 @@ def process(data: dict) -> pd.DataFrame:
     df.loc[mask_xh1, "CT2_TongChenhLech"] = s1                # col 17: CT2 = Tổng chênh lệch
     df.loc[mask_xh1, "CT1_PctChenhLech"] = np.where(std1 != 0, s1 / std1, 0)  # col 18: CT1 = CT2 / tổng Lượng dùng tiêu chuẩn
 
-    mask_xh2 = df["XH_num"] == 2
+    mask_xh2 = df["XH"] == 2
     g3 = df[mask_xh2].groupby(["Ma_so_lenh_tao", "_tt_gop"])
     s3 = g3["Chenh_lech"].transform("sum")
     std3 = g3["Luong_dung_tieu_chuan"].transform("sum")
@@ -624,7 +623,7 @@ def process(data: dict) -> pd.DataFrame:
     df["CT6_TongChenhLech"] = s5                               # col 21: CT6 = Tổng chênh lệch
     df["CT5_PctChenhLech"] = np.where(std5 != 0, s5 / std5, 0)  # col 22: CT5 = CT6 / tổng Lượng dùng tiêu chuẩn
 
-    mask_xh3 = df["XH_num"] == 3
+    mask_xh3 = df["XH"] == 3
     df["_nvl_pair_key"] = df["Ma_NVL"]
     sub_rows = df["_match_type"] == "substitute"
     df.loc[sub_rows, "_nvl_pair_key"] = df.loc[sub_rows, "_main_nvl"].fillna(df.loc[sub_rows, "Ma_NVL"])
@@ -811,10 +810,10 @@ def process(data: dict) -> pd.DataFrame:
                  np.where(ct_err_xhgt3, "?", xhgt3_raw))
 
     # Gán vào cột XH (chỉ dòng có XH tương ứng, còn lại để trống)
-    df["XH=1"] = np.where(df["XH"].astype(str) == "1", xh1_eval, "")
-    df["XH=2"] = np.where(df["XH"].astype(str) == "2", xh2_eval, "")
-    df["XH=3"] = np.where(df["XH"].astype(str) == "3", xh3_eval, "")
-    df["XH>3"] = np.where(~df["XH"].astype(str).isin(["1","2","3"]), xhgt3_eval, "")
+    df["XH=1"] = np.where(df["XH"] == 1, xh1_eval, "")
+    df["XH=2"] = np.where(df["XH"] == 2, xh2_eval, "")
+    df["XH=3"] = np.where(df["XH"] == 3, xh3_eval, "")
+    df["XH>3"] = np.where(~df["XH"].isin([1, 2, 3]), xhgt3_eval, "")
 
     # ── SP (AM): chọn theo XH ────────────────────────────────
     df["_xh1_eval"] = xh1_eval
@@ -822,9 +821,13 @@ def process(data: dict) -> pd.DataFrame:
     df["_xh3_eval"] = xh3_eval
     df["_xhgt3_eval"] = xhgt3_eval
 
-    xh_str = df["XH"].astype(str)
     df["DA_SP"] = np.select(
-        [xh_str == "1", xh_str == "2", xh_str == "3", ~xh_str.isin(["1","2","3"])],
+        [
+            df["XH"] == 1,
+            df["XH"] == 2,
+            df["XH"] == 3,
+            ~df["XH"].isin([1, 2, 3]),
+        ],
         [xh1_eval, xh2_eval, xh3_eval, xhgt3_eval],
         default=""
     )
