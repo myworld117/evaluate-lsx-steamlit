@@ -8,6 +8,7 @@ from __future__ import annotations
 from hashlib import sha256
 from io import BytesIO
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -81,6 +82,73 @@ def export_excel(result: pd.DataFrame) -> bytes:
     return legacy_app.export_to_excel(result).getvalue()
 
 
+def _join_unique_text(values: pd.Series) -> str:
+    """Ghép các ghi chú khác rỗng mà không lặp lại."""
+    unique_values = dict.fromkeys(
+        value
+        for value in values.fillna("").astype(str).str.strip()
+        if value
+    )
+    return "; ".join(unique_values)
+
+
+@st.cache_data(max_entries=10, show_spinner=False)
+def summarize_lsx(rows: pd.DataFrame) -> pd.DataFrame:
+    """Tổng hợp dữ liệu NVL thành đúng một dòng cho mỗi LSX."""
+    working = rows.copy()
+    working["_has_substitute"] = (
+        working[legacy_app.COL_NVL_THAY_THE]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .ne("")
+    )
+    working["_has_5402"] = (
+        working[legacy_app.COL_5402]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .ne("")
+    )
+
+    summary = (
+        working.groupby(legacy_app.COL_MA_LSX, dropna=False, sort=False)
+        .agg(
+            **{
+                legacy_app.COL_DCSX: (legacy_app.COL_DCSX, "first"),
+                legacy_app.COL_MA_SP: (legacy_app.COL_MA_SP, "first"),
+                legacy_app.COL_TEN_VP: (legacy_app.COL_TEN_VP, "first"),
+                legacy_app.COL_NGAY_KC: (legacy_app.COL_NGAY_KC, "first"),
+                legacy_app.COL_NGAY_HT: (legacy_app.COL_NGAY_HT, "first"),
+                legacy_app.COL_TINH_TRANG: (
+                    legacy_app.COL_TINH_TRANG,
+                    "first",
+                ),
+                legacy_app.COL_SL_THUC_TE: (
+                    legacy_app.COL_SL_THUC_TE,
+                    "max",
+                ),
+                legacy_app.COL_DA_LSX: (legacy_app.COL_DA_LSX, "first"),
+                "Số NVL": (legacy_app.COL_MA_NVL, "nunique"),
+                "Có NVL thay thế": ("_has_substitute", "max"),
+                "Có phiếu 5402": ("_has_5402", "max"),
+                legacy_app.COL_GHI_CHU: (
+                    legacy_app.COL_GHI_CHU,
+                    _join_unique_text,
+                ),
+            }
+        )
+        .reset_index()
+    )
+    summary["Có NVL thay thế"] = summary["Có NVL thay thế"].map(
+        {True: "Có", False: "Không"}
+    )
+    summary["Có phiếu 5402"] = summary["Có phiếu 5402"].map(
+        {True: "Có", False: "Không"}
+    )
+    return summary
+
+
 st.session_state.setdefault("upload_result", None)
 st.session_state.setdefault("upload_metadata", None)
 st.session_state.setdefault("processed_fingerprint", None)
@@ -146,21 +214,6 @@ metadata = st.session_state.upload_metadata
 if result is None or metadata is None:
     st.stop()
 
-with st.container(horizontal=True):
-    st.metric("Dòng kết quả", f"{len(result):,}")
-    st.metric(
-        "LSX duy nhất",
-        f"{result[legacy_app.COL_MA_LSX].nunique():,}",
-    )
-    st.metric(
-        "NVL duy nhất",
-        f"{result[legacy_app.COL_MA_NVL].nunique():,}",
-    )
-    st.metric(
-        "NVL thay thế",
-        f"{(result[legacy_app.COL_NVL_THAY_THE].fillna('').str.strip() != '').sum():,}",
-    )
-
 st.caption(
     f"Nguồn: {st.session_state.processed_filename} · "
     f"MOCR27 {metadata['n_mocr']:,} dòng · "
@@ -178,6 +231,10 @@ with st.sidebar:
         "Đánh giá trên LSX",
         evaluation_options,
     )
+    dcsx_options = ["Tất cả"] + sorted(
+        result[legacy_app.COL_DCSX].dropna().astype(str).unique().tolist()
+    )
+    selected_dcsx = st.selectbox("DCSX/GC", dcsx_options)
     status_options = ["Tất cả"] + sorted(
         result[legacy_app.COL_TINH_TRANG].dropna().astype(str).unique().tolist()
     )
@@ -198,6 +255,14 @@ with st.sidebar:
         "Phân loại NVL",
         classification_options,
     )
+    selected_substitute = st.selectbox(
+        "NVL thay thế",
+        ["Tất cả", "Có", "Không"],
+    )
+    selected_5402 = st.selectbox(
+        "Phiếu 5402",
+        ["Tất cả", "Có", "Không"],
+    )
     search = st.text_input(
         "Tìm kiếm",
         placeholder="Mã LSX, SP, NVL hoặc tên vật tư…",
@@ -207,6 +272,10 @@ filtered = result.copy()
 if selected_evaluation != "Tất cả":
     filtered = filtered[
         filtered[legacy_app.COL_DA_LSX].astype(str) == selected_evaluation
+    ]
+if selected_dcsx != "Tất cả":
+    filtered = filtered[
+        filtered[legacy_app.COL_DCSX].astype(str) == selected_dcsx
     ]
 if selected_status != "Tất cả":
     filtered = filtered[
@@ -221,6 +290,26 @@ if selected_classification != "Tất cả":
         filtered[legacy_app.COL_PHAN_LOAI].astype(str)
         == selected_classification
     ]
+if selected_substitute != "Tất cả":
+    has_substitute = (
+        filtered[legacy_app.COL_NVL_THAY_THE]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .ne("")
+    )
+    filtered = filtered[
+        has_substitute if selected_substitute == "Có" else ~has_substitute
+    ]
+if selected_5402 != "Tất cả":
+    has_5402 = (
+        filtered[legacy_app.COL_5402]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .ne("")
+    )
+    filtered = filtered[has_5402 if selected_5402 == "Có" else ~has_5402]
 if search.strip():
     needle = search.strip()
     search_columns = [
@@ -241,14 +330,257 @@ if search.strip():
     ).any(axis=1)
     filtered = filtered.loc[search_mask]
 
-st.subheader(f"Kết quả chi tiết ({len(filtered):,}/{len(result):,} dòng)")
-st.dataframe(
-    legacy_app.style_dataframe(filtered),
-    width="stretch",
-    height=700,
-    hide_index=True,
-    key="uploaded_lsx_result",
+lsx_summary = summarize_lsx(filtered)
+status_counts = lsx_summary[legacy_app.COL_DA_LSX].value_counts()
+lsx_total = len(lsx_summary)
+lsx_passed = int(status_counts.get("LSX đạt", 0))
+lsx_failed = int(status_counts.get("LSX không đạt", 0))
+lsx_no_issue = int(status_counts.get("LSX không lĩnh liệu", 0))
+evaluated_total = lsx_passed + lsx_failed
+pass_rate = lsx_passed / evaluated_total if evaluated_total else 0
+
+with st.container(horizontal=True):
+    st.metric("Tổng LSX", f"{lsx_total:,}", border=True)
+    st.metric("LSX đạt", f"{lsx_passed:,}", border=True)
+    st.metric("LSX không đạt", f"{lsx_failed:,}", border=True)
+    st.metric("Không lĩnh liệu", f"{lsx_no_issue:,}", border=True)
+    st.metric(
+        "Tỷ lệ đạt",
+        f"{pass_rate:.1%}",
+        help="LSX đạt / (LSX đạt + LSX không đạt)",
+        border=True,
+    )
+
+if filtered.empty:
+    st.warning("Không có dữ liệu phù hợp với bộ lọc hiện tại.")
+
+overview_tab, action_tab, material_tab, detail_tab = st.tabs(
+    [
+        "Tổng quan",
+        "LSX cần xử lý",
+        "Phân tích NVL",
+        "Dữ liệu chi tiết",
+    ]
 )
+
+status_domain = ["LSX đạt", "LSX không đạt", "LSX không lĩnh liệu"]
+status_colors = ["#2E7D32", "#C62828", "#EF6C00"]
+
+with overview_tab:
+    chart_left, chart_right = st.columns(2)
+    with chart_left:
+        with st.container(border=True):
+            st.subheader("Trạng thái LSX theo DCSX/GC")
+            status_by_dcsx = (
+                lsx_summary.assign(
+                    **{
+                        legacy_app.COL_DCSX: lsx_summary[
+                            legacy_app.COL_DCSX
+                        ].fillna("(Trống)")
+                    }
+                )
+                .groupby(
+                    [legacy_app.COL_DCSX, legacy_app.COL_DA_LSX],
+                    dropna=False,
+                )
+                .size()
+                .reset_index(name="Số LSX")
+            )
+            if status_by_dcsx.empty:
+                st.info("Không có dữ liệu để hiển thị.")
+            else:
+                dcsx_chart = (
+                    alt.Chart(status_by_dcsx)
+                    .mark_bar()
+                    .encode(
+                        x=alt.X("Số LSX:Q", title="Số LSX"),
+                        y=alt.Y(
+                            f"{legacy_app.COL_DCSX}:N",
+                            title="DCSX/GC",
+                            sort="-x",
+                        ),
+                        color=alt.Color(
+                            f"{legacy_app.COL_DA_LSX}:N",
+                            title="Đánh giá",
+                            scale=alt.Scale(
+                                domain=status_domain,
+                                range=status_colors,
+                            ),
+                        ),
+                        tooltip=[
+                            legacy_app.COL_DCSX,
+                            legacy_app.COL_DA_LSX,
+                            "Số LSX",
+                        ],
+                    )
+                    .properties(height=340)
+                )
+                st.altair_chart(dcsx_chart)
+
+    with chart_right:
+        with st.container(border=True):
+            st.subheader("Top mã SP có LSX không đạt")
+            top_failed_products = (
+                lsx_summary[
+                    lsx_summary[legacy_app.COL_DA_LSX] == "LSX không đạt"
+                ]
+                .groupby(
+                    [legacy_app.COL_MA_SP, legacy_app.COL_TEN_VP],
+                    dropna=False,
+                )[legacy_app.COL_MA_LSX]
+                .nunique()
+                .reset_index(name="Số LSX không đạt")
+                .nlargest(10, "Số LSX không đạt")
+            )
+            if top_failed_products.empty:
+                st.info("Không có LSX không đạt trong phạm vi đang lọc.")
+            else:
+                product_chart = (
+                    alt.Chart(top_failed_products)
+                    .mark_bar(color="#C62828")
+                    .encode(
+                        x=alt.X("Số LSX không đạt:Q"),
+                        y=alt.Y(
+                            f"{legacy_app.COL_MA_SP}:N",
+                            sort="-x",
+                            title="Mã SP",
+                        ),
+                        tooltip=[
+                            legacy_app.COL_MA_SP,
+                            legacy_app.COL_TEN_VP,
+                            "Số LSX không đạt",
+                        ],
+                    )
+                    .properties(height=340)
+                )
+                st.altair_chart(product_chart)
+
+    with st.container(border=True):
+        st.subheader("Tóm tắt LSX")
+        st.dataframe(
+            lsx_summary,
+            width="stretch",
+            height=420,
+            hide_index=True,
+            key="lsx_summary_table",
+        )
+
+with action_tab:
+    action_columns = [
+        legacy_app.COL_MA_LSX,
+        legacy_app.COL_DCSX,
+        legacy_app.COL_MA_SP,
+        legacy_app.COL_TEN_VP,
+        legacy_app.COL_NGAY_HT,
+        legacy_app.COL_TINH_TRANG,
+        legacy_app.COL_SL_THUC_TE,
+        "Số NVL",
+        "Có NVL thay thế",
+        "Có phiếu 5402",
+        legacy_app.COL_DA_LSX,
+        legacy_app.COL_GHI_CHU,
+    ]
+    failed_lsx = lsx_summary[
+        lsx_summary[legacy_app.COL_DA_LSX] == "LSX không đạt"
+    ]
+    no_issue_lsx = lsx_summary[
+        lsx_summary[legacy_app.COL_DA_LSX] == "LSX không lĩnh liệu"
+    ]
+
+    st.subheader(f"LSX không đạt ({len(failed_lsx):,})")
+    st.dataframe(
+        failed_lsx[action_columns],
+        width="stretch",
+        height=420,
+        hide_index=True,
+        key="failed_lsx_table",
+    )
+    st.subheader(f"LSX không lĩnh liệu ({len(no_issue_lsx):,})")
+    st.dataframe(
+        no_issue_lsx[action_columns],
+        width="stretch",
+        height=320,
+        hide_index=True,
+        key="no_issue_lsx_table",
+    )
+
+with material_tab:
+    material_left, material_right = st.columns(2)
+    with material_left:
+        with st.container(border=True):
+            st.subheader("Trạng thái theo sử dụng NVL thay thế")
+            substitute_status = (
+                lsx_summary.groupby(
+                    ["Có NVL thay thế", legacy_app.COL_DA_LSX],
+                    dropna=False,
+                )
+                .size()
+                .reset_index(name="Số LSX")
+            )
+            if substitute_status.empty:
+                st.info("Không có dữ liệu để hiển thị.")
+            else:
+                substitute_chart = (
+                    alt.Chart(substitute_status)
+                    .mark_bar()
+                    .encode(
+                        x=alt.X("Có NVL thay thế:N", title="NVL thay thế"),
+                        y=alt.Y("Số LSX:Q", title="Số LSX"),
+                        color=alt.Color(
+                            f"{legacy_app.COL_DA_LSX}:N",
+                            title="Đánh giá",
+                            scale=alt.Scale(
+                                domain=status_domain,
+                                range=status_colors,
+                            ),
+                        ),
+                        tooltip=[
+                            "Có NVL thay thế",
+                            legacy_app.COL_DA_LSX,
+                            "Số LSX",
+                        ],
+                    )
+                    .properties(height=330)
+                )
+                st.altair_chart(substitute_chart)
+
+    with material_right:
+        with st.container(border=True):
+            st.subheader("Top NVL trong LSX không đạt")
+            failed_lsx_codes = set(
+                failed_lsx[legacy_app.COL_MA_LSX].dropna().astype(str)
+            )
+            failed_materials = filtered[
+                filtered[legacy_app.COL_MA_LSX]
+                .astype(str)
+                .isin(failed_lsx_codes)
+            ]
+            top_failed_materials = (
+                failed_materials.groupby(
+                    [legacy_app.COL_MA_NVL, legacy_app.COL_TEN_VP2],
+                    dropna=False,
+                )[legacy_app.COL_MA_LSX]
+                .nunique()
+                .reset_index(name="Số LSX không đạt")
+                .nlargest(10, "Số LSX không đạt")
+            )
+            st.dataframe(
+                top_failed_materials,
+                width="stretch",
+                height=330,
+                hide_index=True,
+                key="top_failed_materials_table",
+            )
+
+with detail_tab:
+    st.subheader(f"Kết quả chi tiết ({len(filtered):,}/{len(result):,} dòng)")
+    st.dataframe(
+        legacy_app.style_dataframe(filtered),
+        width="stretch",
+        height=700,
+        hide_index=True,
+        key="uploaded_lsx_result",
+    )
 
 with st.container(horizontal=True):
     st.download_button(
