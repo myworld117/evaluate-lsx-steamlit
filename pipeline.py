@@ -488,7 +488,7 @@ def process(data: dict) -> pd.DataFrame:
         if first == "5": return "Vật tư (5)"
         if first == "3": return "BTP (3)"
         if first == "1": return "TP (1)"
-        if first == "8": return "Khác (8)"
+        if first == "8": return "NVL KH gửi (8)"
         return f"Khác ({first})"
 
     df["Phan_loai"] = df["Ma_NVL"].apply(phan_loai_nvl)
