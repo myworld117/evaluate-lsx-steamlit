@@ -1,0 +1,14 @@
+.DS_Store
+.venv/
+__pycache__/
+*.py[cod]
+
+# Dữ liệu sản xuất và file kết quả không được đưa lên GitHub.
+*.xls
+*.xlsx
+*.xlsb
+~$*
+
+# File cấu hình cục bộ có thể chứa thông tin nhạy cảm.
+.streamlit/secrets.toml
+.env
