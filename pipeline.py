@@ -164,10 +164,12 @@ def _build_5402_quantity_map(
 def _apply_5402_sp_corrections(
     df: pd.DataFrame,
     invr17: pd.DataFrame,
+    quantity_map: dict[tuple[str, str], float] | None = None,
     tolerance: float = 0.01,
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
     """Chuyển SP không đạt thành đạt khi phiếu 5402 khớp LSX, NVL và SL."""
-    quantity_map = _build_5402_quantity_map(invr17)
+    if quantity_map is None:
+        quantity_map = _build_5402_quantity_map(invr17)
     quantities = pd.Series(
         [
             quantity_map.get(
@@ -655,32 +657,13 @@ def process(data: dict) -> pd.DataFrame:
     lsx_total = df.groupby("Ma_so_lenh_tao")["SL_dung_thuc"].transform("sum")
     df["LSX_khong_linh_lieu"] = np.where(lsx_total == 0, "LSX không lĩnh liệu", "")
 
-    # ── Bước 8: Kiểm tra phiếu 5402 ─────────────────────────
-    invr17["_ma_ct_str"] = invr17["Ma_CT_INVR"].fillna("").astype(str)
-    invr17["_ghi_chu_str"] = (
-        invr17["Ghi_chu_INVR"].fillna("").astype(str)
-    )
-
-    # Tìm LSX có phiếu 5402: Mã CT bắt đầu bằng 5402
-    mask_5402 = invr17["_ma_ct_str"].str.startswith("5402")
-    # Từ các dòng 5402, lấy mã LSX từ cột Ghi chú
-    lsx_from_ghichu = invr17.loc[mask_5402, "_ghi_chu_str"].dropna()
-    lsx_from_ghichu = lsx_from_ghichu[lsx_from_ghichu.str.strip() != ""]
-    lsx_5402_set = set()
-    for ghi_chu_text in lsx_from_ghichu:
-        # Ghi chú có thể chứa nhiều mã LSX, tách ra
-        for token in ghi_chu_text.replace(",", " ").replace(";", " ").split():
-            token = token.strip()
-            if token:
-                lsx_5402_set.add(token)
-
-    # Đồng thời cũng kiểm tra cột LSX trong INVR17.
-    invr17["_lsx_str"] = invr17["LSX_INVR"].fillna("").astype(str)
-    lsx_5402_set |= set(
-        invr17.loc[mask_5402, "_lsx_str"].dropna().unique()
-    )
-
-    df["_5402_flag"] = df["Ma_so_lenh_tao"].isin(lsx_5402_set)
+    # ── Bước 8: Chỉ đánh dấu đúng dòng NVL có trên phiếu 5402 ─
+    quantity_5402_by_lsx_nvl = _build_5402_quantity_map(invr17)
+    df["_5402_flag"] = [
+        (str(lsx).strip(), str(material).strip())
+        in quantity_5402_by_lsx_nvl
+        for lsx, material in zip(df["Ma_so_lenh_tao"], df["Ma_NVL"])
+    ]
     df["Phieu_linh_vuot_5402"] = np.where(df["_5402_flag"], df["Ma_so_lenh_tao"], "")
 
     # ── GHI CHÚ ─────────────────────────────────────────────
@@ -840,7 +823,11 @@ def process(data: dict) -> pd.DataFrame:
         df["DA_SP"],
         df["_5402_nvl_match"],
         df["_5402_qty_nvl"],
-    ) = _apply_5402_sp_corrections(df, invr17)
+    ) = _apply_5402_sp_corrections(
+        df,
+        invr17,
+        quantity_map=quantity_5402_by_lsx_nvl,
+    )
 
     # ── LSX (AO): đánh giá lại sau khi hiệu chỉnh từng SP/NVL ─
     lsx_groups = df.groupby("Ma_so_lenh_tao")
