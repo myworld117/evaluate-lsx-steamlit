@@ -15,6 +15,7 @@ import streamlit as st
 # Tái sử dụng toàn bộ tên cột, định dạng bảng và hàm export của app cũ.
 # Import app cũng thiết lập page config trước khi UI được render.
 import app as legacy_app
+from data_chat import render_data_chat
 
 
 REQUIRED_SHEETS = (
@@ -354,11 +355,12 @@ with st.container(horizontal=True):
 if filtered.empty:
     st.warning("Không có dữ liệu phù hợp với bộ lọc hiện tại.")
 
-overview_tab, action_tab, material_tab, detail_tab = st.tabs(
+overview_tab, action_tab, material_tab, chat_tab, detail_tab = st.tabs(
     [
         "Tổng quan",
         "LSX cần xử lý",
         "Phân tích NVL",
+        "Hỏi đáp dữ liệu",
         "Dữ liệu chi tiết",
     ]
 )
@@ -571,6 +573,9 @@ with material_tab:
                 hide_index=True,
                 key="top_failed_materials_table",
             )
+
+with chat_tab:
+    render_data_chat(result, fingerprint)
 
 with detail_tab:
     st.subheader(f"Kết quả chi tiết ({len(filtered):,}/{len(result):,} dòng)")

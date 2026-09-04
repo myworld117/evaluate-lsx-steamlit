@@ -362,15 +362,8 @@ def process(data: dict) -> pd.DataFrame:
         key = (str(br['Ma_SP_BOM']).strip(), str(br['Ma_NVL_BOM']).strip())
         bom_dict[key] = (float(br['Luong_dung_to_hop']), float(br['Mau_so']))
 
-    # NVL-only fallback dict
-    bom_nvl_only = bom_lookup.groupby("Ma_NVL_BOM").first().reset_index()
-    bom_nvl_dict = {}
-    for _, br in bom_nvl_only.iterrows():
-        k = str(br['Ma_NVL_BOM']).strip()
-        if k not in bom_nvl_dict:
-            bom_nvl_dict[k] = (float(br['Luong_dung_to_hop']), float(br['Mau_so']))
-
-    # Bước 1: SP+NVL lookup (chỉ SP+NVL, không NVL-only)
+    # Chỉ tra theo cặp SP+NVL. Một NVL có thể có định mức khác nhau giữa
+    # các sản phẩm, nên tuyệt đối không suy diễn từ BOM của sản phẩm khác.
     def lookup_sp_nvl(sp, nvl):
         k = (str(sp).strip(), str(nvl).strip())
         return bom_dict.get(k, (np.nan, np.nan))
@@ -455,17 +448,6 @@ def process(data: dict) -> pd.DataFrame:
                 df.loc[idx, 'Luong_dung_to_hop'] = ldth
                 df.loc[idx, 'Mau_so'] = ms
                 df.loc[idx, '_match_type'] = "substitute"
-
-    # NVL-only fallback: cho dòng chưa tìm thấy SAU KHI đã check substitute
-    mask_need_fallback = df["Luong_dung_to_hop"].isna() & (df["_match_type"] == "not_found")
-    if mask_need_fallback.any():
-        def lookup_nvl(nvl):
-            return bom_nvl_dict.get(str(nvl).strip(), (np.nan, np.nan))
-        tmp2 = df.loc[mask_need_fallback].apply(
-            lambda r: pd.Series(lookup_nvl(r['Ma_NVL'])), axis=1)
-        df.loc[mask_need_fallback, 'Luong_dung_to_hop'] = tmp2[0].values
-        df.loc[mask_need_fallback, 'Mau_so'] = tmp2[1].values
-        df.loc[mask_need_fallback & df['Luong_dung_to_hop'].notna(), '_match_type'] = "in_bom"
 
     # SL = 1.0 mặc định, chỉ lấy từ BOMR20 cho NVL thay thế KHÔNG có trong BOM
     df["_SL"] = 1.0
