@@ -650,7 +650,32 @@ def process(data: dict) -> pd.DataFrame:
 
     # ── GHI CHÚ ─────────────────────────────────────────────
     df["Ghi_chu"] = ""
-    df.loc[df["_match_type"] == "not_found", "Ghi_chu"] = "KHÔNG TÌM THẤY DỮ LIỆU THAY THẾ"
+    row_sp = df["Ma_SP"].fillna("").astype(str).str.strip()
+    row_nvl = df["Ma_NVL"].fillna("").astype(str).str.strip()
+    same_product_and_material = row_sp.ne("") & row_sp.eq(row_nvl)
+    reversed_bom_pairs = {
+        (str(material).strip(), str(product).strip())
+        for product, material in zip(
+            bom_lookup["Ma_SP_BOM"].fillna(""),
+            bom_lookup["Ma_NVL_BOM"].fillna(""),
+        )
+        if str(product).strip() and str(material).strip()
+    }
+    has_reversed_bom_pair = pd.Series(
+        [
+            (product, material) in reversed_bom_pairs
+            for product, material in zip(row_sp, row_nvl)
+        ],
+        index=df.index,
+    )
+    show_missing_substitute_note = (
+        df["_match_type"].eq("not_found")
+        & ~same_product_and_material
+        & ~has_reversed_bom_pair
+    )
+    df.loc[show_missing_substitute_note, "Ghi_chu"] = (
+        "KHÔNG TÌM THẤY DỮ LIỆU THAY THẾ"
+    )
 
     # ═══════════════════════════════════════════════════════════
     # ĐÁNH GIÁ: XH=1,2,3,>3 → SP → LSX (theo logic sheet TH)
